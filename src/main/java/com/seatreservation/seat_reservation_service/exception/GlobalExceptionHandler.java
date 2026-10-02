@@ -4,12 +4,16 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.LocalDateTime;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    private static final Logger log =
+            LoggerFactory.getLogger(GlobalExceptionHandler.class);
     /*
      * ---------------------------------------------------------
      * 400 BAD REQUEST
@@ -127,6 +131,8 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpectedException(
             Exception ex) {
+
+        log.error("Unhandled exception while processing request", ex);
 
         return buildResponse(
                 HttpStatus.INTERNAL_SERVER_ERROR,
