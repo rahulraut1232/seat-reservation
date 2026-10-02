@@ -2,14 +2,19 @@ spring:
   application:
     name: seat-reservation-service
   datasource:
-    url: jdbc:postgresql://localhost:5432/seat_reservation
-    username: postgres
-    password: postgres
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/seat_reservation}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
+
+#    url: jdbc:postgresql://localhost:5432/seat_reservation
+#    username: postgres
+#    password: postgres
+#    driver-class-name: org.postgresql.Driver
 
   jpa:
     hibernate:
-      ddl-auto: update  # final submission ddl-auto: validate
+      ddl-auto: validate  # final submission ddl-auto: validate
     show-sql: false
     properties:
       hibernate:

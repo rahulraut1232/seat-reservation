@@ -1,0 +1,7 @@
+.git/
+.idea/
+.vscode/
+*.iml
+*.log
+README.md
+WRITEUP.md
