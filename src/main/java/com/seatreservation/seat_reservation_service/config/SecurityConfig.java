@@ -7,6 +7,7 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import jakarta.servlet.http.HttpServletResponse;
 
 @Configuration
 public class SecurityConfig {
@@ -26,12 +27,27 @@ public class SecurityConfig {
                 .csrf(csrf -> csrf.disable())
 
                 .sessionManagement(session ->
-                        session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+                        session.sessionCreationPolicy(
+                                SessionCreationPolicy.STATELESS
+                        )
+                )
+
+                .exceptionHandling(exception ->
+                        exception.authenticationEntryPoint(
+                                (request, response, authException) -> {
+                                    response.setStatus(
+                                            HttpServletResponse.SC_UNAUTHORIZED
+                                    );
+                                    response.setContentType("application/json");
+                                    response.getWriter().write(
+                                            "{\"status\":401,\"error\":\"UNAUTHORIZED\",\"message\":\"Authentication required\"}"
+                                    );
+                                }
+                        )
                 )
 
                 .authorizeHttpRequests(auth -> auth
 
-                        // Health endpoints
                         .requestMatchers(
                                 "/health/live",
                                 "/health/ready",
@@ -39,21 +55,20 @@ public class SecurityConfig {
                                 "/actuator/prometheus"
                         ).permitAll()
 
-                        // Public show browsing
                         .requestMatchers(HttpMethod.GET, "/shows").permitAll()
                         .requestMatchers(HttpMethod.GET, "/shows/**").permitAll()
 
-                        // Show creation requires authentication
-                        .requestMatchers(HttpMethod.POST, "/shows").authenticated()
+                        .requestMatchers(
+                                HttpMethod.POST,
+                                "/shows"
+                        ).authenticated()
 
-                        // Reservation and cancellation require authentication
                         .requestMatchers(
                                 HttpMethod.POST,
                                 "/shows/*/reserve",
                                 "/reservations/*/cancel"
                         ).authenticated()
 
-                        // Everything else requires authentication
                         .anyRequest().authenticated()
                 )
 
