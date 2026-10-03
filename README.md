@@ -4,6 +4,36 @@ A concurrency-safe seat reservation backend built with **Java 21, Spring Boot, P
 
 The service is designed for high-contention on-sale scenarios where multiple users may attempt to reserve the same seat concurrently.
 
+## 🚀 Live Deployment
+
+**Live API:** https://seat-reservation-service-gj8y.onrender.com
+
+### Health Checks
+
+- Liveness: `https://seat-reservation-service-gj8y.onrender.com/health/live`
+- Readiness: `https://seat-reservation-service-gj8y.onrender.com/health/ready`
+- Prometheus: `https://seat-reservation-service-gj8y.onrender.com/actuator/prometheus`
+
+> The service is deployed on Render. The free-tier instance may take some
+> time to wake up after inactivity.
+
+## ✅ Deployment Validation
+
+The deployed service was validated using the complete concurrency and
+correctness test suite.
+
+| Test | Result |
+|---|---|
+| Authentication | PASS |
+| Burst / No Double Sell | PASS |
+| Per User Limit | PASS |
+| Idempotency Concurrency | PASS |
+| Idempotency Conflict | PASS |
+| Multi Seat Atomicity | PASS |
+| Cancel Ownership | PASS |
+
+**Result: 7/7 tests passed against the deployed service.**
+
 ## Features
 
 * Create shows with a configurable seat layout and price.
