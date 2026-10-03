@@ -5,9 +5,9 @@ import com.seatreservation.seat_reservation_service.dto.ReserveRequest;
 import com.seatreservation.seat_reservation_service.entity.Reservation;
 import com.seatreservation.seat_reservation_service.service.ReservationService;
 import jakarta.validation.Valid;
-import org.springframework.security.core.Authentication;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -35,9 +35,8 @@ public class ReservationController {
      *   "idempotency_key": "abc-123"
      * }
      *
-     * userId is NOT accepted from the request body.
-     *
-     * It comes from Authentication.
+     * The user ID is NOT accepted from the request body.
+     * It comes from the authenticated bearer token.
      */
     @PostMapping("/shows/{showId}/reserve")
     public ResponseEntity<ReservationResponse> reserve(
@@ -45,17 +44,7 @@ public class ReservationController {
             @Valid @RequestBody ReserveRequest request,
             Authentication authentication) {
 
-        /*
-         * Authentication.getName() should represent the
-         * authenticated user's ID.
-         *
-         * Example:
-         *
-         * authentication.getName()
-         *        -> "user-123"
-         */
-        String userId =
-                authentication.getName();
+        String userId = authentication.getName();
 
         Reservation reservation =
                 reservationService.reserve(
@@ -66,9 +55,7 @@ public class ReservationController {
                 );
 
         ReservationResponse response =
-                ReservationResponse.from(
-                        reservation
-                );
+                ReservationResponse.from(reservation);
 
         return ResponseEntity
                 .status(HttpStatus.CREATED)
@@ -80,23 +67,32 @@ public class ReservationController {
      * CANCEL RESERVATION
      * ---------------------------------------------------------
      *
-     * DELETE /reservations/{reservationId}
+     * POST /reservations/{reservationId}/cancel
      *
      * The owner is obtained from Authentication.
+     *
+     * The client cannot provide userId in the request.
+     *
+     * The service verifies that the authenticated user owns
+     * the reservation before releasing the seats.
      */
-    @DeleteMapping("/reservations/{reservationId}")
-    public ResponseEntity<Void> cancel(
+    @PostMapping("/reservations/{reservationId}/cancel")
+    public ResponseEntity<ReservationResponse> cancel(
             @PathVariable String reservationId,
             Authentication authentication) {
 
-        String userId =
-                authentication.getName();
+        String userId = authentication.getName();
 
-        reservationService.cancel(
-                reservationId,
-                userId
-        );
+        Reservation reservation =
+                reservationService.cancel(
+                        reservationId,
+                        userId
+                );
 
-        return ResponseEntity.noContent().build();
+        ReservationResponse response =
+                ReservationResponse.from(reservation);
+
+        return ResponseEntity
+                .ok(response);
     }
 }

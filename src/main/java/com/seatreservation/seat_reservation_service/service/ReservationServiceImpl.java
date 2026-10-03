@@ -384,7 +384,7 @@ public class ReservationServiceImpl implements ReservationService {
 
     @Override
     @Transactional
-    public void cancel(
+    public Reservation  cancel(
             String reservationId,
             String userId) {
 
@@ -431,7 +431,7 @@ public class ReservationServiceImpl implements ReservationService {
         if (reservation.getStatus()
                 == ReservationStatus.CANCELLED) {
 
-            return;
+            return reservation;
         }
 
         /*
@@ -495,6 +495,12 @@ public class ReservationServiceImpl implements ReservationService {
                                 reservationId
                         );
 
+        if (seats.isEmpty()) {
+            throw new IllegalStateException(
+                    "Reservation has no associated seats"
+            );
+        }
+
         /*
          * ---------------------------------------------------------
          * RELEASE SEATS
@@ -549,6 +555,7 @@ public class ReservationServiceImpl implements ReservationService {
         reservationRepository.save(
                 reservation
         );
+        return reservation;
     }
 
     /*
