@@ -2,8 +2,14 @@ $ErrorActionPreference = "Stop"
 
 $BaseUrl = "http://localhost:8080"
 
-$OwnerUser = "cancel-owner-user"
-$AttackerUser = "cancel-attacker-user"
+$AdminToken = "cancel-test-admin-user"
+$OwnerToken = "cancel-owner-user"
+$AttackerToken = "cancel-attacker-user"
+
+$Seat = "A1"
+
+$TempDir = Join-Path $env:TEMP "seat-cancel-ownership-test"
+New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
 Write-Host ""
 Write-Host "========================================"
@@ -12,479 +18,470 @@ Write-Host "========================================"
 Write-Host "Base URL : $BaseUrl"
 Write-Host ""
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
+$failed = $false
 
-function Get-HttpStatus {
-    param(
-        [string]$Response
-    )
+# ---------------------------------------------------------
+# Helper function
+# ---------------------------------------------------------
 
-    if ($Response -match "HTTP/1\.[01]\s+(\d{3})\b") {
-        return [int]$matches[1]
-    }
-
-    return 0
-}
-
-function Get-ResponseBody {
-    param(
-        [string]$Response
-    )
-
-    $jsonStart = $Response.IndexOf("{")
-
-    if ($jsonStart -ge 0) {
-        return $Response.Substring($jsonStart).Trim()
-    }
-
-    return ""
-}
-
-function Invoke-JsonRequest {
+function Invoke-ApiRequest {
     param(
         [string]$Method,
         [string]$Url,
-        [string]$Body,
-        [string]$UserId
+        [string]$Token,
+        [string]$RequestFile,
+        [string]$ResponseFile,
+        [string]$StatusFile
     )
 
-    $requestFile = Join-Path `
-        $env:TEMP `
-        "cancel-test-$([guid]::NewGuid()).json"
+    $arguments = @(
+        "-s"
+        "-X"
+        $Method
+        $Url
+        "-H"
+        "Content-Type: application/json"
+    )
 
-    try {
-
-        [System.IO.File]::WriteAllText(
-                $requestFile,
-                $Body,
-                [System.Text.UTF8Encoding]::new($false)
+    if ($Token) {
+        $arguments += @(
+            "-H"
+            "Authorization: Bearer $Token"
         )
-
-        $response = curl.exe -s -i `
-            -X $Method `
-            $Url `
-            -H "Authorization: Bearer $UserId" `
-            -H "Content-Type: application/json" `
-            --data-binary "@$requestFile"
-
-        $status = Get-HttpStatus $response
-        $responseBody = Get-ResponseBody $response
-
-        return [PSCustomObject]@{
-            Status = $status
-            Body   = $responseBody
-            Raw    = $response
-        }
     }
-    finally {
 
-        if (Test-Path $requestFile) {
-            Remove-Item $requestFile -Force
-        }
+    if ($RequestFile) {
+        $arguments += @(
+            "--data-binary"
+            "@$RequestFile"
+        )
     }
+
+    $arguments += @(
+        "-o"
+        $ResponseFile
+        "-w"
+        "%{http_code}"
+    )
+
+    & curl.exe @arguments |
+            Set-Content -Path $StatusFile
 }
 
-# ------------------------------------------------------------
-# 1. Create fresh show
-# ------------------------------------------------------------
+# ---------------------------------------------------------
+# 1. Create a fresh show
+# ---------------------------------------------------------
+
+$showRequest = @{
+    name        = "Cancel Ownership Show $(Get-Date -Format 'yyyyMMddHHmmssfff')"
+    seats       = @("A1", "A2", "A3", "A4")
+    price_paise = 10000
+} | ConvertTo-Json -Compress
+
+$showRequestFile = Join-Path $TempDir "show-request.json"
+$showResponseFile = Join-Path $TempDir "show-response.json"
+$showStatusFile = Join-Path $TempDir "show-status.txt"
+
+$showRequest | Set-Content -Path $showRequestFile -Encoding UTF8
 
 Write-Host "Creating test show..."
 
-$showName = "Cancel-Ownership-Test-" + [guid]::NewGuid()
-
-$createBody = @{
-    name        = $showName
-    seats       = @("A1", "A2", "A3", "A4")
-    price_paise = 50000
-} | ConvertTo-Json
-
-$createFile = Join-Path `
-    $env:TEMP `
-    "create-cancel-show-$([guid]::NewGuid()).json"
-
-try {
-
-    [System.IO.File]::WriteAllText(
-            $createFile,
-            $createBody,
-            [System.Text.UTF8Encoding]::new($false)
-    )
-
-    $createResponse = curl.exe -s `
-        -X POST `
-        "$BaseUrl/shows" `
-        -H "Content-Type: application/json" `
-        --data-binary "@$createFile"
-
-    $show = $createResponse | ConvertFrom-Json
-
-    if (-not $show.id) {
-        Write-Host "FAIL: Could not create test show."
-        Write-Host $createResponse
-        exit 1
-    }
-
-    $ShowId = $show.id
-
-    Write-Host "Created show: $ShowId"
-}
-finally {
-
-    if (Test-Path $createFile) {
-        Remove-Item $createFile -Force
-    }
-}
-
-# ------------------------------------------------------------
-# 2. Owner creates reservation
-# ------------------------------------------------------------
-
-Write-Host ""
-Write-Host "Step 1: Owner reserves A1..."
-
-$reservationBody = @{
-    seats = @("A1")
-    idempotency_key = "cancel-test-$([guid]::NewGuid())"
-} | ConvertTo-Json
-
-$reservation = Invoke-JsonRequest `
+Invoke-ApiRequest `
     -Method "POST" `
-    -Url "$BaseUrl/shows/$ShowId/reserve" `
-    -Body $reservationBody `
-    -UserId $OwnerUser
+    -Url "$BaseUrl/shows" `
+    -Token $AdminToken `
+    -RequestFile $showRequestFile `
+    -ResponseFile $showResponseFile `
+    -StatusFile $showStatusFile
 
-Write-Host "Reservation HTTP status: $($reservation.Status)"
+$showStatus = (Get-Content $showStatusFile -Raw).Trim()
 
-if ($reservation.Status -ne 201) {
-
-    Write-Host "FAIL: Owner reservation should return 201."
-    Write-Host $reservation.Body
+if ($showStatus -ne "201") {
+    Write-Host "FAIL: Could not create test show." -ForegroundColor Red
+    Get-Content $showResponseFile
     exit 1
 }
 
-$reservationJson = $reservation.Body | ConvertFrom-Json
+$showResponse = Get-Content $showResponseFile -Raw | ConvertFrom-Json
+$ShowId = $showResponse.id
 
-$ReservationId = $reservationJson.reservation_id
+Write-Host "PASS: Test show created. Show ID: $ShowId" -ForegroundColor Green
+Write-Host ""
+
+# ---------------------------------------------------------
+# 2. Owner creates reservation
+# ---------------------------------------------------------
+
+Write-Host "Owner creating reservation for $Seat..."
+
+$ownerIdempotencyKey = "cancel-owner-key-$(Get-Date -Format 'yyyyMMddHHmmssfff')"
+
+$reserveRequest = @{
+    seats = @($Seat)
+    idempotency_key = $ownerIdempotencyKey
+} | ConvertTo-Json -Compress
+
+$reserveRequestFile = Join-Path $TempDir "reserve-request.json"
+$reserveResponseFile = Join-Path $TempDir "reserve-response.json"
+$reserveStatusFile = Join-Path $TempDir "reserve-status.txt"
+
+$reserveRequest | Set-Content -Path $reserveRequestFile -Encoding UTF8
+
+Invoke-ApiRequest `
+    -Method "POST" `
+    -Url "$BaseUrl/shows/$ShowId/reserve" `
+    -Token $OwnerToken `
+    -RequestFile $reserveRequestFile `
+    -ResponseFile $reserveResponseFile `
+    -StatusFile $reserveStatusFile
+
+$reserveStatus = (Get-Content $reserveStatusFile -Raw).Trim()
+
+Write-Host "Owner reservation HTTP status: $reserveStatus"
+
+if (Test-Path $reserveResponseFile) {
+    Write-Host "Reservation response:"
+    Get-Content $reserveResponseFile
+}
+
+Write-Host ""
+
+if ($reserveStatus -ne "201") {
+    Write-Host "FAIL: Owner reservation expected HTTP 201." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "PASS: Owner successfully created reservation." -ForegroundColor Green
+
+$reservationResponse = Get-Content $reserveResponseFile -Raw | ConvertFrom-Json
+$ReservationId = $reservationResponse.reservation_id
 
 if ([string]::IsNullOrWhiteSpace($ReservationId)) {
-
-    Write-Host "FAIL: Reservation ID missing."
-    Write-Host $reservation.Body
+    Write-Host "FAIL: Reservation ID missing." -ForegroundColor Red
     exit 1
 }
 
 Write-Host "Reservation ID: $ReservationId"
-
-# ------------------------------------------------------------
-# 3. Verify reservation is confirmed
-# ------------------------------------------------------------
-
 Write-Host ""
-Write-Host "Step 2: Verify reservation is confirmed..."
 
-$showBeforeAttackJson = curl.exe -s `
-    "$BaseUrl/shows/$ShowId"
+# ---------------------------------------------------------
+# 3. Attacker attempts cancellation
+# ---------------------------------------------------------
 
-$showBeforeAttack = $showBeforeAttackJson | ConvertFrom-Json
-
-$a1BeforeAttack = $showBeforeAttack.seats |
-        Where-Object { $_.seat -eq "A1" }
-
-if ($a1BeforeAttack.status -eq "CONFIRMED") {
-    Write-Host "PASS: A1 is CONFIRMED."
-}
-else {
-    Write-Host "FAIL: A1 is not CONFIRMED."
-    exit 1
-}
-
-# ------------------------------------------------------------
-# 4. Attacker attempts cancellation
-# ------------------------------------------------------------
-
+Write-Host "Attacker attempting to cancel owner's reservation..."
+Write-Host "Expected result: HTTP 403"
 Write-Host ""
-Write-Host "Step 3: Attacker attempts to cancel owner's reservation..."
 
-$cancelBody = "{}"
+$attackerResponseFile = Join-Path $TempDir "attacker-cancel-response.json"
+$attackerStatusFile = Join-Path $TempDir "attacker-cancel-status.txt"
 
-$attackerCancel = Invoke-JsonRequest `
+Invoke-ApiRequest `
     -Method "POST" `
     -Url "$BaseUrl/reservations/$ReservationId/cancel" `
-    -Body $cancelBody `
-    -UserId $AttackerUser
+    -Token $AttackerToken `
+    -ResponseFile $attackerResponseFile `
+    -StatusFile $attackerStatusFile
 
-Write-Host "Attacker cancel HTTP status: $($attackerCancel.Status)"
-Write-Host "Response:"
-Write-Host $attackerCancel.Body
+$attackerStatus = (Get-Content $attackerStatusFile -Raw).Trim()
 
-# ------------------------------------------------------------
-# 5. Verify attacker receives 403
-# ------------------------------------------------------------
+Write-Host "Attacker cancellation HTTP status: $attackerStatus"
 
-$failed = $false
+if (Test-Path $attackerResponseFile) {
+    Write-Host "Attacker response:"
+    Get-Content $attackerResponseFile
+}
 
 Write-Host ""
-Write-Host "Assertions:"
 
-if ($attackerCancel.Status -eq 403) {
-
-    Write-Host "PASS: Non-owner receives HTTP 403."
-}
-else {
-
-    Write-Host "FAIL: Expected HTTP 403, got $($attackerCancel.Status)."
+if ($attackerStatus -ne "403") {
+    Write-Host "FAIL: Attacker cancellation expected HTTP 403, got $attackerStatus." -ForegroundColor Red
     $failed = $true
 }
+else {
+    Write-Host "PASS: Attacker received HTTP 403." -ForegroundColor Green
+}
 
-$attackerError = $null
+# ---------------------------------------------------------
+# 4. Verify reservation still exists and A1 is confirmed
+# ---------------------------------------------------------
 
-if (-not [string]::IsNullOrWhiteSpace($attackerCancel.Body)) {
+Write-Host "Checking show state after attacker attempt..."
+
+$showAfterAttackFile = Join-Path $TempDir "show-after-attack.json"
+$showAfterAttackStatusFile = Join-Path $TempDir "show-after-attack-status.txt"
+
+Invoke-ApiRequest `
+    -Method "GET" `
+    -Url "$BaseUrl/shows/$ShowId" `
+    -ResponseFile $showAfterAttackFile `
+    -StatusFile $showAfterAttackStatusFile
+
+$showAfterAttackStatus = (Get-Content $showAfterAttackStatusFile -Raw).Trim()
+
+Write-Host "GET /shows/$ShowId -> HTTP $showAfterAttackStatus"
+Write-Host ""
+
+if ($showAfterAttackStatus -ne "200") {
+    Write-Host "FAIL: Could not retrieve show state." -ForegroundColor Red
+    $failed = $true
+}
+else {
+    $showAfterAttack = Get-Content $showAfterAttackFile -Raw | ConvertFrom-Json
+
+    $a1 = $showAfterAttack.seats |
+            Where-Object { $_.seat -eq $Seat }
+
+    if ($null -eq $a1) {
+        Write-Host "FAIL: Seat $Seat not found." -ForegroundColor Red
+        $failed = $true
+    }
+    elseif ($a1.status -ne "CONFIRMED") {
+        Write-Host "FAIL: Seat $Seat changed after unauthorized cancellation." -ForegroundColor Red
+        Write-Host "Current status: $($a1.status)"
+        $failed = $true
+    }
+    else {
+        Write-Host "PASS: Seat $Seat remains CONFIRMED after attacker attempt." -ForegroundColor Green
+    }
+
+    $confirmedAfterAttack = [int]$showAfterAttack.confirmed_seats
+    $availableAfterAttack = [int]$showAfterAttack.available_seats
+    $heldAfterAttack = [int]$showAfterAttack.held_seats
+    $totalAfterAttack = [int]$showAfterAttack.total_seats
+
+    $invariantAfterAttack =
+    $availableAfterAttack +
+            $heldAfterAttack +
+            $confirmedAfterAttack
+
+    if ($invariantAfterAttack -ne $totalAfterAttack) {
+        Write-Host "FAIL: Seat invariant violated after attacker attempt." -ForegroundColor Red
+        $failed = $true
+    }
+    else {
+        Write-Host "PASS: Seat invariant holds after attacker attempt: $availableAfterAttack + $heldAfterAttack + $confirmedAfterAttack = $totalAfterAttack" -ForegroundColor Green
+    }
+}
+
+Write-Host ""
+
+# ---------------------------------------------------------
+# 5. Owner cancels reservation
+# ---------------------------------------------------------
+
+Write-Host "Owner cancelling reservation..."
+Write-Host "Expected result: HTTP 200"
+Write-Host ""
+
+$ownerCancelResponseFile = Join-Path $TempDir "owner-cancel-response.json"
+$ownerCancelStatusFile = Join-Path $TempDir "owner-cancel-status.txt"
+
+Invoke-ApiRequest `
+    -Method "POST" `
+    -Url "$BaseUrl/reservations/$ReservationId/cancel" `
+    -Token $OwnerToken `
+    -ResponseFile $ownerCancelResponseFile `
+    -StatusFile $ownerCancelStatusFile
+
+$ownerCancelStatus = (Get-Content $ownerCancelStatusFile -Raw).Trim()
+
+Write-Host "Owner cancellation HTTP status: $ownerCancelStatus"
+
+if (Test-Path $ownerCancelResponseFile) {
+    Write-Host "Owner cancellation response:"
+    Get-Content $ownerCancelResponseFile
+}
+
+Write-Host ""
+
+if ($ownerCancelStatus -ne "200") {
+    Write-Host "FAIL: Owner cancellation expected HTTP 200, got $ownerCancelStatus." -ForegroundColor Red
+    $failed = $true
+}
+else {
+    Write-Host "PASS: Owner successfully cancelled reservation." -ForegroundColor Green
+}
+
+# ---------------------------------------------------------
+# 6. Validate cancellation status
+# ---------------------------------------------------------
+
+if ($ownerCancelStatus -eq "200") {
 
     try {
-        $attackerError = $attackerCancel.Body | ConvertFrom-Json
+        $cancelResponse = Get-Content $ownerCancelResponseFile -Raw | ConvertFrom-Json
+
+        if ($cancelResponse.status -ne "CANCELLED") {
+            Write-Host "FAIL: Expected reservation status CANCELLED, got $($cancelResponse.status)." -ForegroundColor Red
+            $failed = $true
+        }
+        else {
+            Write-Host "PASS: Reservation status is CANCELLED." -ForegroundColor Green
+        }
     }
     catch {
-        $attackerError = $null
+        Write-Host "FAIL: Could not parse cancellation response." -ForegroundColor Red
+        $failed = $true
     }
 }
 
-if ($null -ne $attackerError -and
-        $attackerError.errorCode -eq "RESERVATION_NOT_OWNED") {
+Write-Host ""
 
-    Write-Host "PASS: Error code is RESERVATION_NOT_OWNED."
+# ---------------------------------------------------------
+# 7. Verify A1 becomes available
+# ---------------------------------------------------------
+
+Write-Host "Checking final show state..."
+
+$finalShowFile = Join-Path $TempDir "final-show.json"
+$finalShowStatusFile = Join-Path $TempDir "final-show-status.txt"
+
+Invoke-ApiRequest `
+    -Method "GET" `
+    -Url "$BaseUrl/shows/$ShowId" `
+    -ResponseFile $finalShowFile `
+    -StatusFile $finalShowStatusFile
+
+$finalShowStatus = (Get-Content $finalShowStatusFile -Raw).Trim()
+
+Write-Host "GET /shows/$ShowId -> HTTP $finalShowStatus"
+Write-Host ""
+
+if ($finalShowStatus -ne "200") {
+    Write-Host "FAIL: Could not retrieve final show state." -ForegroundColor Red
+    $failed = $true
 }
 else {
 
-    Write-Host "FAIL: Expected RESERVATION_NOT_OWNED."
-    $failed = $true
-}
+    $finalShow = Get-Content $finalShowFile -Raw | ConvertFrom-Json
 
-# ------------------------------------------------------------
-# 6. Verify attacker did not release the seat
-# ------------------------------------------------------------
+    Write-Host "Final Show State"
+    Write-Host "----------------"
+    Write-Host "Total Seats:     $($finalShow.total_seats)"
+    Write-Host "Available Seats: $($finalShow.available_seats)"
+    Write-Host "Held Seats:      $($finalShow.held_seats)"
+    Write-Host "Confirmed Seats: $($finalShow.confirmed_seats)"
+    Write-Host ""
+
+    # -----------------------------------------------------
+    # Validate A1
+    # -----------------------------------------------------
+
+    $a1Final = $finalShow.seats |
+            Where-Object { $_.seat -eq $Seat }
+
+    if ($null -eq $a1Final) {
+        Write-Host "FAIL: Seat $Seat not found in final state." -ForegroundColor Red
+        $failed = $true
+    }
+    elseif ($a1Final.status -ne "AVAILABLE") {
+        Write-Host "FAIL: Seat $Seat status is $($a1Final.status), expected AVAILABLE." -ForegroundColor Red
+        $failed = $true
+    }
+    else {
+        Write-Host "PASS: Seat $Seat is AVAILABLE after owner cancellation." -ForegroundColor Green
+    }
+
+    # -----------------------------------------------------
+    # Validate counts
+    # -----------------------------------------------------
+
+    $total = [int]$finalShow.total_seats
+    $available = [int]$finalShow.available_seats
+    $held = [int]$finalShow.held_seats
+    $confirmed = [int]$finalShow.confirmed_seats
+
+    if ($available -ne 4) {
+        Write-Host "FAIL: Expected 4 available seats, got $available." -ForegroundColor Red
+        $failed = $true
+    }
+    else {
+        Write-Host "PASS: All 4 seats are AVAILABLE." -ForegroundColor Green
+    }
+
+    if ($held -ne 0) {
+        Write-Host "FAIL: Expected 0 held seats, got $held." -ForegroundColor Red
+        $failed = $true
+    }
+    else {
+        Write-Host "PASS: Held seat count is 0." -ForegroundColor Green
+    }
+
+    if ($confirmed -ne 0) {
+        Write-Host "FAIL: Expected 0 confirmed seats, got $confirmed." -ForegroundColor Red
+        $failed = $true
+    }
+    else {
+        Write-Host "PASS: Confirmed seat count is 0." -ForegroundColor Green
+    }
+
+    # -----------------------------------------------------
+    # Validate invariant
+    # -----------------------------------------------------
+
+    $invariant = $available + $held + $confirmed
+
+    if ($invariant -ne $total) {
+        Write-Host "FAIL: Seat invariant violated: $available + $held + $confirmed != $total" -ForegroundColor Red
+        $failed = $true
+    }
+    else {
+        Write-Host "PASS: Seat invariant holds: $available + $held + $confirmed = $total" -ForegroundColor Green
+    }
+}
 
 Write-Host ""
-Write-Host "Step 4: Verify attacker did not release A1..."
 
-$showAfterAttackJson = curl.exe -s `
-    "$BaseUrl/shows/$ShowId"
+# ---------------------------------------------------------
+# 8. Repeat owner cancellation
+# ---------------------------------------------------------
 
-$showAfterAttack = $showAfterAttackJson | ConvertFrom-Json
-
-$a1AfterAttack = $showAfterAttack.seats |
-        Where-Object { $_.seat -eq "A1" }
-
-if ($a1AfterAttack.status -eq "CONFIRMED") {
-
-    Write-Host "PASS: A1 remains CONFIRMED."
-}
-else {
-
-    Write-Host "FAIL: A1 changed after unauthorized cancellation."
-    $failed = $true
-}
-
-if ($showAfterAttack.confirmed_seats -eq 1) {
-
-    Write-Host "PASS: Confirmed seat count remains 1."
-}
-else {
-
-    Write-Host "FAIL: Expected 1 confirmed seat."
-    $failed = $true
-}
-
-# ------------------------------------------------------------
-# 7. Owner cancels reservation
-# ------------------------------------------------------------
-
+Write-Host "Testing repeated owner cancellation..."
+Write-Host "Expected result: HTTP 200 (idempotent/safe)"
 Write-Host ""
-Write-Host "Step 5: Owner cancels reservation..."
 
-$ownerCancel = Invoke-JsonRequest `
+$repeatCancelResponseFile = Join-Path $TempDir "repeat-cancel-response.json"
+$repeatCancelStatusFile = Join-Path $TempDir "repeat-cancel-status.txt"
+
+Invoke-ApiRequest `
     -Method "POST" `
     -Url "$BaseUrl/reservations/$ReservationId/cancel" `
-    -Body $cancelBody `
-    -UserId $OwnerUser
+    -Token $OwnerToken `
+    -ResponseFile $repeatCancelResponseFile `
+    -StatusFile $repeatCancelStatusFile
 
-Write-Host "Owner cancel HTTP status: $($ownerCancel.Status)"
-Write-Host "Response:"
-Write-Host $ownerCancel.Body
+$repeatCancelStatus = (Get-Content $repeatCancelStatusFile -Raw).Trim()
 
-if ($ownerCancel.Status -eq 200) {
+Write-Host "Repeated cancellation HTTP status: $repeatCancelStatus"
 
-    Write-Host "PASS: Owner cancellation returned HTTP 200."
+if (Test-Path $repeatCancelResponseFile) {
+    Get-Content $repeatCancelResponseFile
 }
-else {
-
-    Write-Host "FAIL: Expected HTTP 200 from owner cancellation."
-    $failed = $true
-}
-
-# ------------------------------------------------------------
-# 8. Verify seat released
-# ------------------------------------------------------------
 
 Write-Host ""
-Write-Host "Step 6: Verify A1 is AVAILABLE..."
 
-$showAfterOwnerCancelJson = curl.exe -s `
-    "$BaseUrl/shows/$ShowId"
-
-$showAfterOwnerCancel = $showAfterOwnerCancelJson | ConvertFrom-Json
-
-$a1AfterOwnerCancel = $showAfterOwnerCancel.seats |
-        Where-Object { $_.seat -eq "A1" }
-
-if ($a1AfterOwnerCancel.status -eq "AVAILABLE") {
-
-    Write-Host "PASS: A1 is AVAILABLE after owner cancellation."
-}
-else {
-
-    Write-Host "FAIL: A1 was not released."
+if ($repeatCancelStatus -ne "200") {
+    Write-Host "FAIL: Repeated cancellation expected HTTP 200, got $repeatCancelStatus." -ForegroundColor Red
     $failed = $true
 }
-
-if ($showAfterOwnerCancel.available_seats -eq 4) {
-
-    Write-Host "PASS: Available seat count returned to 4."
-}
 else {
-
-    Write-Host "FAIL: Expected 4 available seats."
-    $failed = $true
+    Write-Host "PASS: Repeated owner cancellation is safe." -ForegroundColor Green
 }
 
-if ($showAfterOwnerCancel.confirmed_seats -eq 0) {
-
-    Write-Host "PASS: Confirmed seat count returned to 0."
-}
-else {
-
-    Write-Host "FAIL: Expected 0 confirmed seats."
-    $failed = $true
-}
-
-if ($showAfterOwnerCancel.held_seats -eq 0) {
-
-    Write-Host "PASS: Held seat count is 0."
-}
-else {
-
-    Write-Host "FAIL: Expected 0 held seats."
-    $failed = $true
-}
-
-# ------------------------------------------------------------
-# 9. Verify reconciliation invariant
-# ------------------------------------------------------------
+# ---------------------------------------------------------
+# 9. Final result
+# ---------------------------------------------------------
 
 Write-Host ""
-Write-Host "Step 7: Verify seat reconciliation invariant..."
-
-$invariant =
-$showAfterOwnerCancel.available_seats +
-        $showAfterOwnerCancel.held_seats +
-        $showAfterOwnerCancel.confirmed_seats
-
-if ($invariant -eq $showAfterOwnerCancel.total_seats) {
-
-    Write-Host "PASS: Seat invariant holds:"
-    Write-Host "      $($showAfterOwnerCancel.available_seats) + $($showAfterOwnerCancel.held_seats) + $($showAfterOwnerCancel.confirmed_seats) = $($showAfterOwnerCancel.total_seats)"
-}
-else {
-
-    Write-Host "FAIL: Seat invariant violated."
-    $failed = $true
-}
-
-# ------------------------------------------------------------
-# 10. Repeat cancellation
-# ------------------------------------------------------------
-
-Write-Host ""
-Write-Host "Step 8: Repeat owner cancellation..."
-
-$repeatCancel = Invoke-JsonRequest `
-    -Method "POST" `
-    -Url "$BaseUrl/reservations/$ReservationId/cancel" `
-    -Body $cancelBody `
-    -UserId $OwnerUser
-
-Write-Host "Repeated cancel HTTP status: $($repeatCancel.Status)"
-
-if ($repeatCancel.Status -eq 200) {
-
-    Write-Host "PASS: Repeated cancellation is safely idempotent."
-}
-else {
-
-    Write-Host "FAIL: Repeated cancellation returned $($repeatCancel.Status)."
-    $failed = $true
-}
-
-# ------------------------------------------------------------
-# 11. Final state check
-# ------------------------------------------------------------
-
-Write-Host ""
-Write-Host "Final show state:"
-
-$finalShowJson = curl.exe -s `
-    "$BaseUrl/shows/$ShowId"
-
-$finalShow = $finalShowJson | ConvertFrom-Json
-
-$finalShow | ConvertTo-Json -Depth 10
-
-$finalInvariant =
-$finalShow.available_seats +
-        $finalShow.held_seats +
-        $finalShow.confirmed_seats
-
-if ($finalInvariant -eq $finalShow.total_seats) {
-
-    Write-Host ""
-    Write-Host "PASS: Final seat invariant holds."
-}
-else {
-
-    Write-Host ""
-    Write-Host "FAIL: Final seat invariant violated."
-    $failed = $true
-}
-
-# ------------------------------------------------------------
-# 12. Final result
-# ------------------------------------------------------------
-
-Write-Host ""
+Write-Host "========================================"
 
 if ($failed) {
-
+    Write-Host " CANCEL OWNERSHIP TEST FAILED" -ForegroundColor Red
     Write-Host "========================================"
-    Write-Host " CANCEL OWNERSHIP TEST FAILED"
-    Write-Host "========================================"
-
     exit 1
 }
 else {
-
+    Write-Host " CANCEL OWNERSHIP TEST PASSED" -ForegroundColor Green
     Write-Host "========================================"
-    Write-Host " CANCEL OWNERSHIP TEST PASSED"
-    Write-Host "========================================"
-
-    Write-Host ""
-    Write-Host "Verified:"
-    Write-Host "  - Non-owner cannot cancel reservation"
-    Write-Host "  - Unauthorized cancellation returns 403"
-    Write-Host "  - Owner can cancel reservation"
-    Write-Host "  - Cancellation releases seats"
-    Write-Host "  - Repeated cancellation is safe"
-    Write-Host "  - Seat reconciliation invariant holds"
-    Write-Host ""
-    Write-Host "Show ID: $ShowId"
+    exit 0
 }

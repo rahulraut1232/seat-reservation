@@ -1,359 +1,431 @@
-﻿param(
-    [string]$BaseUrl = "http://localhost:8080",
-    [int]$ConcurrentRequests = 20,
-    [string]$Seat = "A1"
-)
+﻿$ErrorActionPreference = "Stop"
 
-$ErrorActionPreference = "Stop"
+$BaseUrl = "http://localhost:8080"
+$RequestCount = 20
+$TargetSeat = "A1"
 
 Write-Host ""
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host " Seat Reservation Concurrency Test" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "========================================"
+Write-Host " Seat Reservation Concurrency Test"
+Write-Host "========================================"
 Write-Host "Base URL : $BaseUrl"
-Write-Host "Requests : $ConcurrentRequests"
-Write-Host "Seat     : $Seat"
+Write-Host "Requests : $RequestCount"
+Write-Host "Seat     : $TargetSeat"
 Write-Host ""
 
-# --------------------------------------------------
-# 1. Create a fresh show
-# --------------------------------------------------
+# ------------------------------------------------------------
+# Helper: execute curl request and return status + body
+# ------------------------------------------------------------
 
-$showName = "Burst-Test-" + [Guid]::NewGuid().ToString()
+function Invoke-CurlRequest {
+    param(
+        [string]$Url,
+        [string]$Method,
+        [string]$RequestFile,
+        [string]$ResponseFile,
+        [string]$Token
+    )
 
-$showBody = @{
-    name        = $showName
+    $StatusFile = "$ResponseFile.status"
+
+    if (Test-Path $ResponseFile) {
+        Remove-Item $ResponseFile -Force
+    }
+
+    if (Test-Path $StatusFile) {
+        Remove-Item $StatusFile -Force
+    }
+
+    if ($RequestFile) {
+        & curl.exe `
+            -s `
+            -o $ResponseFile `
+            -w "%{http_code}" `
+            -X $Method `
+            $Url `
+            -H "Authorization: Bearer $Token" `
+            -H "Content-Type: application/json" `
+            --data-binary "@$RequestFile" |
+                Set-Content -Path $StatusFile
+    }
+    else {
+        & curl.exe `
+            -s `
+            -o $ResponseFile `
+            -w "%{http_code}" `
+            -X $Method `
+            $Url `
+            -H "Authorization: Bearer $Token" |
+                Set-Content -Path $StatusFile
+    }
+
+    $Status = (Get-Content $StatusFile -Raw).Trim()
+
+    if (-not $Status) {
+        $Status = "000"
+    }
+
+    $Body = ""
+
+    if (Test-Path $ResponseFile) {
+        $Body = Get-Content $ResponseFile -Raw
+    }
+
+    return @{
+        Status = $Status
+        Body   = $Body
+    }
+}
+
+# ------------------------------------------------------------
+# Create a unique test show
+# ------------------------------------------------------------
+
+Write-Host "Creating test show..."
+
+$ShowName = "Burst-Test-$(New-Guid)"
+
+$ShowRequest = @{
+    name        = $ShowName
     seats       = @("A1", "A2", "A3", "A4")
     price_paise = 50000
-} | ConvertTo-Json
+} | ConvertTo-Json -Compress
 
-$showFile = Join-Path $env:TEMP "burst-show-$([Guid]::NewGuid()).json"
+$ShowRequestFile = Join-Path $env:TEMP "burst-show-request.json"
+$ShowResponseFile = Join-Path $env:TEMP "burst-show-response.json"
 
-$showBody | Set-Content -Encoding UTF8 $showFile
+$ShowRequest | Set-Content -Path $ShowRequestFile -Encoding UTF8
 
-Write-Host "Creating test show..." -ForegroundColor Yellow
+$ShowResult = Invoke-CurlRequest `
+    -Url "$BaseUrl/shows" `
+    -Method "POST" `
+    -RequestFile $ShowRequestFile `
+    -ResponseFile $ShowResponseFile `
+    -Token "burst-admin-user"
 
-$showResponse = curl.exe `
-    -s `
-    -X POST `
-    "$BaseUrl/shows" `
-    -H "Content-Type: application/json" `
-    --data-binary "@$showFile"
+Write-Host "Create show HTTP status: $($ShowResult.Status)"
 
-$show = $showResponse | ConvertFrom-Json
-$showId = $show.id
-
-Remove-Item $showFile -Force
-
-Write-Host "Created show: $showId" -ForegroundColor Green
-Write-Host ""
-
-# --------------------------------------------------
-# 2. Prepare temporary directory
-# --------------------------------------------------
-
-Write-Host "Launching $ConcurrentRequests concurrent reservations for $Seat..." -ForegroundColor Yellow
-Write-Host ""
-
-$tempDirectory = Join-Path `
-    $env:TEMP `
-    "seat-burst-$([Guid]::NewGuid())"
-
-New-Item `
-    -ItemType Directory `
-    -Path $tempDirectory `
-    -Force | Out-Null
-
-$jobs = @()
-
-# --------------------------------------------------
-# 3. Create request files and background jobs
-# --------------------------------------------------
-
-for ($i = 1; $i -le $ConcurrentRequests; $i++) {
-
-    $userId = "burst-user-$i"
-
-    $idempotencyKey = `
-        "burst-$i-$([Guid]::NewGuid())"
-
-    $requestId = "burst-$i"
-
-    $requestFile = Join-Path `
-        $tempDirectory `
-        "request-$i.json"
-
-    $outputFile = Join-Path `
-        $tempDirectory `
-        "response-$i.txt"
-
-    $requestJson = @"
-{
-  "seats": ["$Seat"],
-  "idempotency_key": "$idempotencyKey"
+if ($ShowResult.Status -ne "200" -and $ShowResult.Status -ne "201") {
+    Write-Host "FAIL: Could not create test show."
+    Write-Host "Response:"
+    Write-Host $ShowResult.Body
+    exit 1
 }
-"@
 
-    # IMPORTANT:
-    # Write JSON to a file instead of passing JSON
-    # through PowerShell command-line quoting.
+$Show = $ShowResult.Body | ConvertFrom-Json
+$ShowId = $Show.id
 
-    $requestJson | Set-Content `
-        -Encoding UTF8 `
-        -Path $requestFile
+if (-not $ShowId) {
+    Write-Host "FAIL: Show ID was not returned."
+    Write-Host $ShowResult.Body
+    exit 1
+}
 
-    $job = Start-Job -ScriptBlock {
+Write-Host "Created show: $ShowId"
+Write-Host ""
 
+# ------------------------------------------------------------
+# Prepare concurrency jobs
+# ------------------------------------------------------------
+
+$TempDirectory = Join-Path $env:TEMP "seat-burst-$([Guid]::NewGuid())"
+New-Item -ItemType Directory -Path $TempDirectory -Force | Out-Null
+
+Write-Host "Launching $RequestCount concurrent reservations for $TargetSeat..."
+Write-Host ""
+
+$Jobs = @()
+
+for ($i = 1; $i -le $RequestCount; $i++) {
+
+    $UserId = "burst-user-$i"
+    $IdempotencyKey = "burst-$ShowId-$i"
+
+    $RequestFile = Join-Path $TempDirectory "request-$i.json"
+    $ResponseFile = Join-Path $TempDirectory "response-$i.json"
+    $StatusFile = Join-Path $TempDirectory "status-$i.txt"
+
+    $RequestBody = @{
+        seats           = @($TargetSeat)
+        idempotency_key = $IdempotencyKey
+    } | ConvertTo-Json -Compress
+
+    $RequestBody | Set-Content -Path $RequestFile -Encoding UTF8
+
+    $Jobs += Start-Job -ScriptBlock {
         param(
             $BaseUrl,
             $ShowId,
-            $UserId,
-            $RequestId,
             $RequestFile,
-            $OutputFile
+            $ResponseFile,
+            $StatusFile,
+            $UserId
         )
 
-        & curl.exe `
-            -s `
-            -i `
-            -X POST `
-            "$BaseUrl/shows/$ShowId/reserve" `
-            -H "Authorization: Bearer $UserId" `
-            -H "Content-Type: application/json" `
-            -H "X-Request-ID: $RequestId" `
-            --data-binary "@$RequestFile" `
-            > $OutputFile
+        try {
+            & curl.exe `
+                -s `
+                -o $ResponseFile `
+                -w "%{http_code}" `
+                -X POST `
+                "$BaseUrl/shows/$ShowId/reserve" `
+                -H "Authorization: Bearer $UserId" `
+                -H "Content-Type: application/json" `
+                --data-binary "@$RequestFile" |
+                    Set-Content -Path $StatusFile
 
-        [PSCustomObject]@{
-            OutputFile = $OutputFile
+        }
+        catch {
+            "000" | Set-Content -Path $StatusFile
+            $_.Exception.Message | Set-Content -Path $ResponseFile
         }
 
     } -ArgumentList `
         $BaseUrl,
-        $showId,
-        $userId,
-        $requestId,
-        $requestFile,
-        $outputFile
+    $ShowId,
+    $RequestFile,
+    $ResponseFile,
+    $StatusFile,
+    $UserId
+}
 
-    $jobs += [PSCustomObject]@{
-        Number     = $i
-        Job        = $job
-        OutputFile = $outputFile
+# ------------------------------------------------------------
+# Wait for all requests
+# ------------------------------------------------------------
+
+Write-Host "Waiting for all requests..."
+
+$Jobs | Wait-Job | Out-Null
+
+$Jobs | Remove-Job -Force
+
+Write-Host "All requests completed."
+Write-Host ""
+
+# ------------------------------------------------------------
+# Collect results
+# ------------------------------------------------------------
+
+$Results = @()
+
+for ($i = 1; $i -le $RequestCount; $i++) {
+
+    $ResponseFile = Join-Path $TempDirectory "response-$i.json"
+    $StatusFile = Join-Path $TempDirectory "status-$i.txt"
+
+    $Status = "000"
+    $Body = ""
+
+    if (Test-Path $StatusFile) {
+        $Status = (Get-Content $StatusFile -Raw).Trim()
+    }
+
+    if (Test-Path $ResponseFile) {
+        $Body = Get-Content $ResponseFile -Raw
+    }
+
+    $Results += [PSCustomObject]@{
+        Request = $i
+        Status  = $Status
+        Body    = $Body
     }
 }
 
-# --------------------------------------------------
-# 4. Wait for all requests
-# --------------------------------------------------
+# ------------------------------------------------------------
+# Count HTTP responses
+# ------------------------------------------------------------
 
-Write-Host "Waiting for all requests..." -ForegroundColor Yellow
+$Count201 = @($Results | Where-Object { $_.Status -eq "201" }).Count
+$Count409 = @($Results | Where-Object { $_.Status -eq "409" }).Count
+$Count5xx = @($Results | Where-Object {
+    $_.Status -match "^5\d\d$"
+}).Count
 
-foreach ($item in $jobs) {
+$Count401 = @($Results | Where-Object { $_.Status -eq "401" }).Count
+$Count403 = @($Results | Where-Object { $_.Status -eq "403" }).Count
+$CountOther = @($Results | Where-Object {
+    $_.Status -notmatch "^(201|409|401|403)$"
+}).Count
 
-    Receive-Job `
-        -Job $item.Job `
-        -Wait `
-        | Out-Null
+Write-Host "========================================"
+Write-Host " Results"
+Write-Host "========================================"
+Write-Host "HTTP 201: $Count201"
+Write-Host "HTTP 409: $Count409"
+Write-Host "HTTP 401: $Count401"
+Write-Host "HTTP 403: $Count403"
+Write-Host "5xx Errors: $Count5xx"
+Write-Host "Other: $CountOther"
+Write-Host ""
 
-    Remove-Job `
-        -Job $item.Job `
-        -Force
+# ------------------------------------------------------------
+# Show unexpected responses
+# ------------------------------------------------------------
+
+$Unexpected = @($Results | Where-Object {
+    $_.Status -notmatch "^(201|409)$"
+})
+
+if ($Unexpected.Count -gt 0) {
+
+    Write-Host "Unexpected responses:"
+    Write-Host ""
+
+    foreach ($Result in $Unexpected) {
+        Write-Host "Request $($Result.Request)"
+        Write-Host "Status: $($Result.Status)"
+        Write-Host "Body:"
+        Write-Host $Result.Body
+        Write-Host ""
+    }
 }
 
-Write-Host "All requests completed." -ForegroundColor Green
-Write-Host ""
+# ------------------------------------------------------------
+# Fetch final show state
+# ------------------------------------------------------------
 
-# --------------------------------------------------
-# 5. Parse responses
-# --------------------------------------------------
+Write-Host "Final show state:"
 
-$results = @()
+$FinalShowResponseFile = Join-Path $env:TEMP "burst-final-show.json"
 
-foreach ($item in $jobs) {
-
-    $content = ""
-
-    if (Test-Path $item.OutputFile) {
-        $content = Get-Content `
-            $item.OutputFile `
-            -Raw
-    }
-
-    $status = 0
-
-    if ($content -match "HTTP/\S+\s+(\d+)") {
-        $status = [int]$Matches[1]
-    }
-
-    $results += [PSCustomObject]@{
-        Request  = $item.Number
-        Status   = $status
-        Response = $content
-    }
-}
-
-# --------------------------------------------------
-# 6. Results
-# --------------------------------------------------
-
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host " Results" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-
-$results |
-    Group-Object Status |
-    Sort-Object Name |
-    ForEach-Object {
-        Write-Host (
-            "HTTP {0}: {1}" -f $_.Name, $_.Count
-        )
-    }
-
-$successCount = @(
-    $results |
-        Where-Object { $_.Status -eq 201 }
-).Count
-
-$conflictCount = @(
-    $results |
-        Where-Object { $_.Status -eq 409 }
-).Count
-
-$errorCount = @(
-    $results |
-        Where-Object { $_.Status -ge 500 }
-).Count
-
-Write-Host ""
-Write-Host "201 Created : $successCount"
-Write-Host "409 Conflict: $conflictCount"
-Write-Host "5xx Errors  : $errorCount"
-Write-Host ""
-
-# --------------------------------------------------
-# 7. Final show state
-# --------------------------------------------------
-
-Write-Host "Final show state:" -ForegroundColor Yellow
-
-$showStateResponse = curl.exe `
+& curl.exe `
     -s `
-    "$BaseUrl/shows/$showId"
+    -o $FinalShowResponseFile `
+    "$BaseUrl/shows/$ShowId"
 
-$showState = $showStateResponse | ConvertFrom-Json
+$FinalShowBody = Get-Content $FinalShowResponseFile -Raw
 
-$showState |
-    ConvertTo-Json `
-        -Depth 5
-
+Write-Host $FinalShowBody
 Write-Host ""
 
-$total     = $showState.total_seats
-$available = $showState.available_seats
-$held      = $showState.held_seats
-$confirmed = $showState.confirmed_seats
+$FinalShow = $FinalShowBody | ConvertFrom-Json
 
-$invariant = `
-    $available +
-    $held +
-    $confirmed
+# ------------------------------------------------------------
+# Assertions
+# ------------------------------------------------------------
 
-# --------------------------------------------------
-# 8. Assertions
-# --------------------------------------------------
-
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host " Assertions" -ForegroundColor Cyan
+Write-Host "========================================"
+Write-Host " Assertions"
 Write-Host "========================================"
 
-$allPassed = $true
+$Passed = $true
 
-if ($successCount -eq 1) {
-
-    Write-Host `
-        "PASS: Exactly one request succeeded." `
-        -ForegroundColor Green
+# Exactly one winner
+if ($Count201 -eq 1) {
+    Write-Host "PASS: Exactly one successful reservation."
 }
 else {
-
-    Write-Host `
-        "FAIL: Expected exactly one successful reservation." `
-        -ForegroundColor Red
-
-    $allPassed = $false
+    Write-Host "FAIL: Expected exactly one successful reservation. Got $Count201."
+    $Passed = $false
 }
 
-if ($conflictCount -eq ($ConcurrentRequests - 1)) {
-
-    Write-Host `
-        "PASS: Remaining requests were rejected with 409." `
-        -ForegroundColor Green
+# All remaining requests should be 409
+if ($Count409 -eq ($RequestCount - 1)) {
+    Write-Host "PASS: Expected conflict count."
 }
 else {
-
-    Write-Host `
-        "FAIL: Unexpected conflict count." `
-        -ForegroundColor Red
-
-    $allPassed = $false
+    Write-Host "FAIL: Expected $($RequestCount - 1) conflicts. Got $Count409."
+    $Passed = $false
 }
 
-if ($errorCount -eq 0) {
-
-    Write-Host `
-        "PASS: Zero 5xx responses." `
-        -ForegroundColor Green
+# No 5xx
+if ($Count5xx -eq 0) {
+    Write-Host "PASS: Zero 5xx responses."
 }
 else {
-
-    Write-Host `
-        "FAIL: 5xx responses detected." `
-        -ForegroundColor Red
-
-    $allPassed = $false
+    Write-Host "FAIL: Found $Count5xx 5xx responses."
+    $Passed = $false
 }
 
-if ($invariant -eq $total) {
-
-    Write-Host `
-        "PASS: Seat invariant holds: $available + $held + $confirmed = $total" `
-        -ForegroundColor Green
+# No unexpected authentication failures
+if ($Count401 -eq 0 -and $Count403 -eq 0) {
+    Write-Host "PASS: All concurrent requests were authenticated."
 }
 else {
-
-    Write-Host `
-        "FAIL: Seat invariant violated." `
-        -ForegroundColor Red
-
-    $allPassed = $false
+    Write-Host "FAIL: Authentication failures detected."
+    $Passed = $false
 }
+
+# Final seat state
+if ($FinalShow.seats) {
+
+    $TargetSeatState = $FinalShow.seats |
+            Where-Object { $_.seat -eq $TargetSeat }
+
+    if ($TargetSeatState.status -eq "CONFIRMED") {
+        Write-Host "PASS: $TargetSeat is CONFIRMED."
+    }
+    else {
+        Write-Host "FAIL: $TargetSeat expected CONFIRMED but was $($TargetSeatState.status)."
+        $Passed = $false
+    }
+
+    if ($FinalShow.confirmed_seats -eq 1) {
+        Write-Host "PASS: Confirmed seat count is 1."
+    }
+    else {
+        Write-Host "FAIL: Expected confirmed seat count 1. Got $($FinalShow.confirmed_seats)."
+        $Passed = $false
+    }
+
+    # Seat reconciliation invariant
+    $Total = [int]$FinalShow.total_seats
+    $Available = [int]$FinalShow.available_seats
+    $Held = [int]$FinalShow.held_seats
+    $Confirmed = [int]$FinalShow.confirmed_seats
+
+    if (($Available + $Held + $Confirmed) -eq $Total) {
+        Write-Host "PASS: Seat invariant holds: $Available + $Held + $Confirmed = $Total"
+    }
+    else {
+        Write-Host "FAIL: Seat invariant violated:"
+        Write-Host "      $Available + $Held + $Confirmed != $Total"
+        $Passed = $false
+    }
+}
+else {
+    Write-Host "FAIL: Could not read final show state."
+    $Passed = $false
+}
+
+# ------------------------------------------------------------
+# Cleanup
+# ------------------------------------------------------------
+
+if (Test-Path $TempDirectory) {
+    Remove-Item $TempDirectory -Recurse -Force
+}
+
+if (Test-Path $ShowRequestFile) {
+    Remove-Item $ShowRequestFile -Force
+}
+
+if (Test-Path $ShowResponseFile) {
+    Remove-Item $ShowResponseFile -Force
+}
+
+if (Test-Path $FinalShowResponseFile) {
+    Remove-Item $FinalShowResponseFile -Force
+}
+
+# ------------------------------------------------------------
+# Final result
+# ------------------------------------------------------------
 
 Write-Host ""
-Write-Host "Show ID: $showId"
+Write-Host "========================================"
 
-if ($allPassed) {
-
-    Write-Host ""
-    Write-Host "========================================" -ForegroundColor Green
-    Write-Host " CONCURRENCY TEST PASSED" -ForegroundColor Green
-    Write-Host "========================================" -ForegroundColor Green
+if ($Passed) {
+    Write-Host " CONCURRENCY TEST PASSED"
 }
 else {
-
+    Write-Host " CONCURRENCY TEST FAILED"
+    Write-Host "========================================"
     Write-Host ""
-    Write-Host "========================================" -ForegroundColor Red
-    Write-Host " CONCURRENCY TEST FAILED" -ForegroundColor Red
-    Write-Host "========================================" -ForegroundColor Red
+    Write-Host "Show ID: $ShowId"
+    exit 1
 }
 
+Write-Host "========================================"
 Write-Host ""
-
-# --------------------------------------------------
-# 9. Cleanup
-# --------------------------------------------------
-
-Remove-Item `
-    $tempDirectory `
-    -Recurse `
-    -Force
+Write-Host "Show ID: $ShowId"

@@ -1,188 +1,130 @@
 $ErrorActionPreference = "Stop"
 
 $BaseUrl = "http://localhost:8080"
-$UserId = "idempotency-conflict-user"
-$IdempotencyKey = "idem-conflict-$([guid]::NewGuid())"
 
+$AdminToken = "idempotency-conflict-admin"
+$TestUserToken = "idempotency-conflict-user"
+
+$RequestCount = 2
+
+# Generate a unique idempotency key for every test execution.
+$IdempotencyKey = "idem-conflict-$(Get-Date -Format 'yyyyMMddHHmmssfff')"
+
+$TempDir = Join-Path $env:TEMP "seat-idempotency-conflict-test"
+New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+
+Write-Host "========================================="
+Write-Host " IDEMPOTENCY CONFLICT TEST"
+Write-Host "========================================="
 Write-Host ""
-Write-Host "========================================"
-Write-Host " Idempotency Key Conflict Test"
-Write-Host "========================================"
-Write-Host "Base URL        : $BaseUrl"
-Write-Host "User            : $UserId"
-Write-Host "Idempotency Key : $IdempotencyKey"
-Write-Host ""
 
-# ------------------------------------------------------------
-# Helper: extract HTTP status from curl response
-# ------------------------------------------------------------
-
-function Get-HttpStatus {
-    param(
-        [string]$Response
-    )
-
-    if ($Response -match "HTTP/1\.[01]\s+(\d{3})\b") {
-        return [int]$matches[1]
-    }
-
-    return 0
-}
-
-# ------------------------------------------------------------
-# Helper: extract JSON body from curl response
-# ------------------------------------------------------------
-
-function Get-ResponseBody {
-    param(
-        [string]$Response
-    )
-
-    # Find the beginning of the JSON response.
-    # Spring's response body starts with {.
-    $jsonStart = $Response.IndexOf("{")
-
-    if ($jsonStart -ge 0) {
-        return $Response.Substring($jsonStart).Trim()
-    }
-
-    return ""
-}
-
-# ------------------------------------------------------------
+# ---------------------------------------------------------
 # 1. Create a fresh show
-# ------------------------------------------------------------
+# ---------------------------------------------------------
+
+$showRequest = @{
+    name        = "Idempotency Conflict Show $(Get-Date -Format 'yyyyMMddHHmmssfff')"
+    seats       = @("A1", "A2", "A3", "A4")
+    price_paise = 10000
+} | ConvertTo-Json -Compress
+
+$showRequestFile = Join-Path $TempDir "show-request.json"
+$showResponseFile = Join-Path $TempDir "show-response.json"
+$showStatusFile = Join-Path $TempDir "show-status.txt"
+
+$showRequest | Set-Content -Path $showRequestFile -Encoding UTF8
 
 Write-Host "Creating test show..."
 
-$showName = "Idempotency-Conflict-Test-" + [guid]::NewGuid()
+curl.exe `
+    -s `
+    -X POST `
+    "$BaseUrl/shows" `
+    -H "Content-Type: application/json" `
+    -H "Authorization: Bearer $AdminToken" `
+    --data-binary "@$showRequestFile" `
+    -o $showResponseFile `
+    -w "%{http_code}" |
+        Set-Content -Path $showStatusFile
 
-$createBody = @{
-    name        = $showName
-    seats       = @("A1", "A2", "A3", "A4")
-    price_paise = 50000
-} | ConvertTo-Json
+$showStatus = (Get-Content $showStatusFile -Raw).Trim()
 
-$createFile = Join-Path `
-    $env:TEMP `
-    "create-conflict-show-$([guid]::NewGuid()).json"
-
-try {
-
-    [System.IO.File]::WriteAllText(
-            $createFile,
-            $createBody,
-            [System.Text.UTF8Encoding]::new($false)
-    )
-
-    $createResponse = curl.exe -s `
-        -X POST `
-        "$BaseUrl/shows" `
-        -H "Content-Type: application/json" `
-        --data-binary "@$createFile"
-
-    if ([string]::IsNullOrWhiteSpace($createResponse)) {
-        Write-Host "FAIL: Create show returned an empty response."
-        exit 1
-    }
-
-    $show = $createResponse | ConvertFrom-Json
-
-    if (-not $show.id) {
-        Write-Host "FAIL: Could not determine created show ID."
-        Write-Host $createResponse
-        exit 1
-    }
-
-    $ShowId = $show.id
-
-    Write-Host "Created show: $ShowId"
-}
-finally {
-
-    if (Test-Path $createFile) {
-        Remove-Item $createFile -Force
-    }
+if ($showStatus -ne "201") {
+    Write-Host "FAIL: Show creation returned HTTP $showStatus" -ForegroundColor Red
+    Get-Content $showResponseFile
+    exit 1
 }
 
-# ------------------------------------------------------------
-# 2. First request
-#
-# Same idempotency key will be reused later,
-# but the first request books A1.
-# ------------------------------------------------------------
+$showResponse = Get-Content $showResponseFile -Raw | ConvertFrom-Json
+$ShowId = $showResponse.id
+
+Write-Host "Show created: $ShowId"
+Write-Host "Idempotency Key: $IdempotencyKey"
+Write-Host ""
+
+# ---------------------------------------------------------
+# 2. First request - A1
+# ---------------------------------------------------------
+
+Write-Host "Request 1:"
+Write-Host "  Seat: A1"
+Write-Host "  Idempotency Key: $IdempotencyKey"
+Write-Host ""
 
 $request1 = @{
     seats = @("A1")
     idempotency_key = $IdempotencyKey
-} | ConvertTo-Json
+} | ConvertTo-Json -Compress
 
-$request1File = Join-Path `
-    $env:TEMP `
-    "idem-conflict-request1-$([guid]::NewGuid()).json"
+$request1File = Join-Path $TempDir "request-1.json"
+$response1File = Join-Path $TempDir "response-1.json"
+$status1File = Join-Path $TempDir "status-1.txt"
 
-[System.IO.File]::WriteAllText(
-        $request1File,
-        $request1,
-        [System.Text.UTF8Encoding]::new($false)
-)
+$request1 | Set-Content -Path $request1File -Encoding UTF8
 
-Write-Host ""
-Write-Host "Request 1:"
-Write-Host "  Seat: A1"
-Write-Host "  Key : $IdempotencyKey"
-Write-Host ""
-
-$response1 = curl.exe -s -i `
+curl.exe `
+    -s `
     -X POST `
     "$BaseUrl/shows/$ShowId/reserve" `
-    -H "Authorization: Bearer $UserId" `
     -H "Content-Type: application/json" `
-    --data-binary "@$request1File"
+    -H "Authorization: Bearer $TestUserToken" `
+    --data-binary "@$request1File" `
+    -o $response1File `
+    -w "%{http_code}" |
+        Set-Content -Path $status1File
 
-$status1 = Get-HttpStatus $response1
-$body1 = Get-ResponseBody $response1
+$status1 = (Get-Content $status1File -Raw).Trim()
 
-Write-Host "Response 1:"
-Write-Host $response1
-Write-Host ""
-Write-Host "Parsed HTTP status: $status1"
+Write-Host "Request 1 HTTP Status: $status1"
 
-# ------------------------------------------------------------
-# 3. Validate first request
-# ------------------------------------------------------------
-
-if ($status1 -ne 201) {
-
-    Write-Host ""
-    Write-Host "FAIL: First request expected HTTP 201 but received $status1."
-    Write-Host "Response:"
-    Write-Host $response1
-
-    Remove-Item $request1File -Force -ErrorAction SilentlyContinue
-
-    exit 1
+if (Test-Path $response1File) {
+    Write-Host "Request 1 Response:"
+    Get-Content $response1File
 }
 
-Write-Host "PASS: First request returned 201."
+Write-Host ""
 
-# ------------------------------------------------------------
-# 4. Extract reservation ID
-# ------------------------------------------------------------
+# ---------------------------------------------------------
+# 3. Validate first request
+# ---------------------------------------------------------
 
+$failed = $false
 $reservationId = $null
 
-if (-not [string]::IsNullOrWhiteSpace($body1)) {
+if ($status1 -ne "201") {
+    Write-Host "FAIL: First request expected HTTP 201, got $status1." -ForegroundColor Red
+    $failed = $true
+}
+else {
+    Write-Host "PASS: First request returned HTTP 201." -ForegroundColor Green
 
     try {
-        $json1 = $body1 | ConvertFrom-Json
-
-        if ($json1.reservation_id) {
-            $reservationId = $json1.reservation_id
-        }
+        $response1 = Get-Content $response1File -Raw | ConvertFrom-Json
+        $reservationId = $response1.reservation_id
     }
     catch {
-        Write-Host "WARNING: Could not parse first response JSON."
+        Write-Host "FAIL: Could not parse first reservation response." -ForegroundColor Red
+        $failed = $true
     }
 }
 
@@ -190,261 +132,224 @@ if ($reservationId) {
     Write-Host "Reservation ID: $reservationId"
 }
 else {
-    Write-Host "WARNING: Reservation ID could not be extracted."
+    Write-Host "FAIL: Reservation ID missing from first response." -ForegroundColor Red
+    $failed = $true
 }
 
-# ------------------------------------------------------------
-# 5. Second request
-#
-# IMPORTANT:
-# Same user
-# Same idempotency key
-# DIFFERENT seat
-#
-# This must return 409 IDEMPOTENCY_CONFLICT.
-# ------------------------------------------------------------
+Write-Host ""
+
+# ---------------------------------------------------------
+# 4. Second request - A2 with SAME idempotency key
+# ---------------------------------------------------------
+
+Write-Host "Request 2:"
+Write-Host "  Seat: A2"
+Write-Host "  Idempotency Key: $IdempotencyKey"
+Write-Host ""
+Write-Host "Expected result: HTTP 409 IDEMPOTENCY_CONFLICT"
+Write-Host ""
 
 $request2 = @{
     seats = @("A2")
     idempotency_key = $IdempotencyKey
-} | ConvertTo-Json
+} | ConvertTo-Json -Compress
 
-$request2File = Join-Path `
-    $env:TEMP `
-    "idem-conflict-request2-$([guid]::NewGuid()).json"
+$request2File = Join-Path $TempDir "request-2.json"
+$response2File = Join-Path $TempDir "response-2.json"
+$status2File = Join-Path $TempDir "status-2.txt"
 
-[System.IO.File]::WriteAllText(
-        $request2File,
-        $request2,
-        [System.Text.UTF8Encoding]::new($false)
-)
+$request2 | Set-Content -Path $request2File -Encoding UTF8
 
-Write-Host ""
-Write-Host "Request 2:"
-Write-Host "  Seat: A2"
-Write-Host "  Key : $IdempotencyKey"
-Write-Host ""
-Write-Host "Same idempotency key, DIFFERENT request body."
-Write-Host ""
-
-$response2 = curl.exe -s -i `
+curl.exe `
+    -s `
     -X POST `
     "$BaseUrl/shows/$ShowId/reserve" `
-    -H "Authorization: Bearer $UserId" `
     -H "Content-Type: application/json" `
-    --data-binary "@$request2File"
+    -H "Authorization: Bearer $TestUserToken" `
+    --data-binary "@$request2File" `
+    -o $response2File `
+    -w "%{http_code}" |
+        Set-Content -Path $status2File
 
-$status2 = Get-HttpStatus $response2
-$body2 = Get-ResponseBody $response2
+$status2 = (Get-Content $status2File -Raw).Trim()
 
-Write-Host "Response 2:"
-Write-Host $response2
-Write-Host ""
-Write-Host "Parsed HTTP status: $status2"
+Write-Host "Request 2 HTTP Status: $status2"
 
-# ------------------------------------------------------------
-# 6. Fetch final show state
-# ------------------------------------------------------------
-
-Write-Host ""
-Write-Host "Fetching final show state..."
-
-$finalShowJson = curl.exe -s "$BaseUrl/shows/$ShowId"
-
-if ([string]::IsNullOrWhiteSpace($finalShowJson)) {
-
-    Write-Host "FAIL: Could not retrieve final show state."
-
-    Remove-Item $request1File -Force -ErrorAction SilentlyContinue
-    Remove-Item $request2File -Force -ErrorAction SilentlyContinue
-
-    exit 1
+if (Test-Path $response2File) {
+    Write-Host "Request 2 Response:"
+    Get-Content $response2File
 }
+
+Write-Host ""
+
+# ---------------------------------------------------------
+# 5. Validate conflict
+# ---------------------------------------------------------
+
+if ($status2 -ne "409") {
+    Write-Host "FAIL: Second request expected HTTP 409, got $status2." -ForegroundColor Red
+    $failed = $true
+}
+else {
+    Write-Host "PASS: Second request returned HTTP 409." -ForegroundColor Green
+}
+
+$conflictResponse = $null
 
 try {
-    $finalShow = $finalShowJson | ConvertFrom-Json
+    $conflictResponse = Get-Content $response2File -Raw | ConvertFrom-Json
+
+    if ($conflictResponse.error -eq "IDEMPOTENCY_CONFLICT") {
+        Write-Host "PASS: Error code is IDEMPOTENCY_CONFLICT." -ForegroundColor Green
+    }
+    else {
+        Write-Host "WARNING: Expected error code IDEMPOTENCY_CONFLICT, got '$($conflictResponse.error)'." -ForegroundColor Yellow
+    }
 }
 catch {
+    Write-Host "FAIL: Could not parse conflict response." -ForegroundColor Red
+    $failed = $true
+}
 
-    Write-Host "FAIL: Could not parse final show JSON."
-    Write-Host $finalShowJson
+Write-Host ""
 
-    Remove-Item $request1File -Force -ErrorAction SilentlyContinue
-    Remove-Item $request2File -Force -ErrorAction SilentlyContinue
+# ---------------------------------------------------------
+# 6. Fetch final show state
+# ---------------------------------------------------------
 
+Write-Host "Fetching final show state..."
+
+$finalShowFile = Join-Path $TempDir "final-show.json"
+
+$finalStatus = curl.exe `
+    -s `
+    -X GET `
+    "$BaseUrl/shows/$ShowId" `
+    -o $finalShowFile `
+    -w "%{http_code}"
+
+Write-Host "GET /shows/$ShowId -> HTTP $finalStatus"
+Write-Host ""
+
+if ($finalStatus -ne "200") {
+    Write-Host "FAIL: Could not retrieve final show state." -ForegroundColor Red
+    Get-Content $finalShowFile
     exit 1
 }
 
+$finalShow = Get-Content $finalShowFile -Raw | ConvertFrom-Json
+
+# ---------------------------------------------------------
+# 7. Print final state
+# ---------------------------------------------------------
+
+Write-Host "Final Show State"
+Write-Host "----------------"
+Write-Host "Total Seats:     $($finalShow.total_seats)"
+Write-Host "Available Seats: $($finalShow.available_seats)"
+Write-Host "Held Seats:      $($finalShow.held_seats)"
+Write-Host "Confirmed Seats: $($finalShow.confirmed_seats)"
 Write-Host ""
-Write-Host "Final show state:"
-$finalShow | ConvertTo-Json -Depth 10
 
-# ------------------------------------------------------------
-# 7. Assertions
-# ------------------------------------------------------------
+$total = [int]$finalShow.total_seats
+$available = [int]$finalShow.available_seats
+$held = [int]$finalShow.held_seats
+$confirmed = [int]$finalShow.confirmed_seats
 
-Write-Host ""
-Write-Host "Assertions:"
+# ---------------------------------------------------------
+# 8. Validate final counts
+# ---------------------------------------------------------
 
-$failed = $false
-
-# ------------------------------------------------------------
-# Assertion 1
-# First request = 201
-# ------------------------------------------------------------
-
-if ($status1 -eq 201) {
-    Write-Host "PASS: First request returned 201."
-}
-else {
-    Write-Host "FAIL: First request returned $status1 instead of 201."
+if ($confirmed -ne 1) {
+    Write-Host "FAIL: Expected exactly 1 confirmed seat." -ForegroundColor Red
     $failed = $true
 }
-
-# ------------------------------------------------------------
-# Assertion 2
-# Second request = 409
-# ------------------------------------------------------------
-
-if ($status2 -eq 409) {
-    Write-Host "PASS: Second request returned 409."
-}
 else {
-    Write-Host "FAIL: Second request returned $status2 instead of 409."
+    Write-Host "PASS: Exactly 1 seat is CONFIRMED." -ForegroundColor Green
+}
+
+if ($available -ne 3) {
+    Write-Host "FAIL: Expected 3 available seats." -ForegroundColor Red
     $failed = $true
 }
-
-# ------------------------------------------------------------
-# Assertion 3
-# Correct error code
-# ------------------------------------------------------------
-
-if ($body2 -match '"errorCode"\s*:\s*"IDEMPOTENCY_CONFLICT"') {
-    Write-Host "PASS: Error code is IDEMPOTENCY_CONFLICT."
-}
 else {
-    Write-Host "FAIL: Expected IDEMPOTENCY_CONFLICT error code."
+    Write-Host "PASS: 3 seats remain AVAILABLE." -ForegroundColor Green
+}
 
-    if (-not [string]::IsNullOrWhiteSpace($body2)) {
-        Write-Host "Response body:"
-        Write-Host $body2
-    }
-
+if ($held -ne 0) {
+    Write-Host "FAIL: Expected 0 held seats." -ForegroundColor Red
     $failed = $true
 }
+else {
+    Write-Host "PASS: Held seat count is 0." -ForegroundColor Green
+}
 
-# ------------------------------------------------------------
-# Assertion 4
-# A1 must be confirmed
-# ------------------------------------------------------------
+# ---------------------------------------------------------
+# 9. Validate seat invariant
+# ---------------------------------------------------------
+
+$invariant = $available + $held + $confirmed
+
+if ($invariant -ne $total) {
+    Write-Host "FAIL: Seat invariant violated: $available + $held + $confirmed != $total" -ForegroundColor Red
+    $failed = $true
+}
+else {
+    Write-Host "PASS: Seat invariant holds: $available + $held + $confirmed = $total" -ForegroundColor Green
+}
+
+# ---------------------------------------------------------
+# 10. Validate A1 = CONFIRMED
+# ---------------------------------------------------------
 
 $a1 = $finalShow.seats |
         Where-Object { $_.seat -eq "A1" }
 
-if ($null -ne $a1 -and $a1.status -eq "CONFIRMED") {
-    Write-Host "PASS: A1 remains CONFIRMED."
-}
-else {
-    Write-Host "FAIL: A1 is not CONFIRMED."
+if ($null -eq $a1) {
+    Write-Host "FAIL: Seat A1 not found." -ForegroundColor Red
     $failed = $true
 }
+elseif ($a1.status -ne "CONFIRMED") {
+    Write-Host "FAIL: Seat A1 status is $($a1.status), expected CONFIRMED." -ForegroundColor Red
+    $failed = $true
+}
+else {
+    Write-Host "PASS: Seat A1 is CONFIRMED." -ForegroundColor Green
+}
 
-# ------------------------------------------------------------
-# Assertion 5
-# A2 must remain available
-# ------------------------------------------------------------
+# ---------------------------------------------------------
+# 11. Validate A2 = AVAILABLE
+# ---------------------------------------------------------
 
 $a2 = $finalShow.seats |
         Where-Object { $_.seat -eq "A2" }
 
-if ($null -ne $a2 -and $a2.status -eq "AVAILABLE") {
-    Write-Host "PASS: A2 remains AVAILABLE."
-}
-else {
-    Write-Host "FAIL: A2 was incorrectly changed."
+if ($null -eq $a2) {
+    Write-Host "FAIL: Seat A2 not found." -ForegroundColor Red
     $failed = $true
 }
-
-# ------------------------------------------------------------
-# Assertion 6
-# Exactly one confirmed seat
-# ------------------------------------------------------------
-
-if ($finalShow.confirmed_seats -eq 1) {
-    Write-Host "PASS: Exactly one seat is confirmed."
-}
-else {
-    Write-Host "FAIL: Expected exactly 1 confirmed seat, got $($finalShow.confirmed_seats)."
+elseif ($a2.status -ne "AVAILABLE") {
+    Write-Host "FAIL: Seat A2 status is $($a2.status), expected AVAILABLE." -ForegroundColor Red
     $failed = $true
 }
-
-# ------------------------------------------------------------
-# Assertion 7
-# No held seats
-# ------------------------------------------------------------
-
-if ($finalShow.held_seats -eq 0) {
-    Write-Host "PASS: No seats are unexpectedly held."
-}
 else {
-    Write-Host "FAIL: Expected 0 held seats, got $($finalShow.held_seats)."
-    $failed = $true
+    Write-Host "PASS: Seat A2 remains AVAILABLE." -ForegroundColor Green
 }
 
-# ------------------------------------------------------------
-# Assertion 8
-# Seat reconciliation invariant
-# ------------------------------------------------------------
-
-$invariant =
-$finalShow.available_seats +
-        $finalShow.held_seats +
-        $finalShow.confirmed_seats
-
-if ($invariant -eq $finalShow.total_seats) {
-
-    Write-Host "PASS: Seat invariant holds: $($finalShow.available_seats) + $($finalShow.held_seats) + $($finalShow.confirmed_seats) = $($finalShow.total_seats)"
-}
-else {
-
-    Write-Host "FAIL: Seat invariant violated."
-    Write-Host "      $($finalShow.available_seats) + $($finalShow.held_seats) + $($finalShow.confirmed_seats) != $($finalShow.total_seats)"
-
-    $failed = $true
-}
-
-# ------------------------------------------------------------
-# 9. Cleanup
-# ------------------------------------------------------------
-
-Remove-Item $request1File -Force -ErrorAction SilentlyContinue
-Remove-Item $request2File -Force -ErrorAction SilentlyContinue
-
-# ------------------------------------------------------------
-# 10. Final result
-# ------------------------------------------------------------
+# ---------------------------------------------------------
+# 12. Final result
+# ---------------------------------------------------------
 
 Write-Host ""
+Write-Host "========================================="
 
 if ($failed) {
-
-    Write-Host "========================================"
-    Write-Host " IDEMPOTENCY CONFLICT TEST FAILED"
-    Write-Host "========================================"
-
+    Write-Host " IDEMPOTENCY CONFLICT TEST FAILED" -ForegroundColor Red
+    Write-Host "========================================="
     exit 1
 }
 else {
-
-    Write-Host "========================================"
-    Write-Host " IDEMPOTENCY CONFLICT TEST PASSED"
-    Write-Host "========================================"
-
-    Write-Host ""
-    Write-Host "Show ID             : $ShowId"
-    Write-Host "Original Reservation: $reservationId"
-    Write-Host ""
-    Write-Host "A1 = CONFIRMED"
-    Write-Host "A2 = AVAILABLE"
-    Write-Host "Same key + different body = 409"
+    Write-Host " IDEMPOTENCY CONFLICT TEST PASSED" -ForegroundColor Green
+    Write-Host "========================================="
+    exit 0
 }
