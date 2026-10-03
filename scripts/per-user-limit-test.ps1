@@ -1,6 +1,10 @@
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$BaseUrl
+)
+
 $ErrorActionPreference = "Stop"
 
-$BaseUrl = "http://localhost:8080"
 $RequestCount = 10
 $PerUserLimit = 4
 

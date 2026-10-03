@@ -1,6 +1,10 @@
-﻿$ErrorActionPreference = "Stop"
+﻿param(
+    [Parameter(Mandatory = $true)]
+    [string]$BaseUrl
+)
 
-$BaseUrl = "http://localhost:8080"
+$ErrorActionPreference = "Stop"
+
 $RequestCount = 20
 $TargetSeat = "A1"
 

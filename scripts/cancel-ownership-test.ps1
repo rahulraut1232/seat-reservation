@@ -1,6 +1,9 @@
-$ErrorActionPreference = "Stop"
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$BaseUrl
+)
 
-$BaseUrl = "http://localhost:8080"
+$ErrorActionPreference = "Stop"
 
 $AdminToken = "cancel-test-admin-user"
 $OwnerToken = "cancel-owner-user"
